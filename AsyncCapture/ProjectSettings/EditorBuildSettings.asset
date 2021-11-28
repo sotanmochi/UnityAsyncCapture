@@ -4,5 +4,8 @@
 EditorBuildSettings:
   m_ObjectHideFlags: 0
   serializedVersion: 2
-  m_Scenes: []
+  m_Scenes:
+  - enabled: 1
+    path: Assets/AsyncCapture.Samples/AsyncCaptureSample.unity
+    guid: 3224d528bcf2e664298f96989a259d71
   m_configObjects: {}
