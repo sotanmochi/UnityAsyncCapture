@@ -123,7 +123,7 @@ namespace AsyncCapture
             }
         }
 
-        private void RequestCapture()
+        public void RequestCapture()
         {
             var index = _processedFrameCount++ % _bufferCount;
 
