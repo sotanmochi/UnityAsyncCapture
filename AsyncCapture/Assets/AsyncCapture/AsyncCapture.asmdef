@@ -1,7 +1,9 @@
 {
     "name": "AsyncCapture",
     "rootNamespace": "",
-    "references": [],
+    "references": [
+        "UniRx"
+    ],
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": true,

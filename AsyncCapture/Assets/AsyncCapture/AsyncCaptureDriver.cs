@@ -1,25 +1,23 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.IO;
-using System.Threading.Tasks;
 using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Experimental.Rendering;
+using UniRx;
 
 namespace AsyncCapture
 {
     public sealed class AsyncCaptureDriver : MonoBehaviour
     {
+        public event Action<Capture> OnCapture;
+
         public bool Initialized => _initialized;
         private bool _initialized;
 
         public bool AutoDrive => _autoDrive;
         private bool _autoDrive;
-
-        private string _saveDirectoryPath;
-        private uint _saveImageCount;
 
         private uint _processedFrameCount;
         private bool _screenCapture;
@@ -29,6 +27,7 @@ namespace AsyncCapture
         private Vector2 _scOffset = new Vector2(0, 1);
 
         private Texture _captureTargetTexture;
+        private int _bytesPerPixel;
         private int _width, _height;
         private GraphicsFormat _format;
 
@@ -38,7 +37,9 @@ namespace AsyncCapture
         private NativeArray<byte>[] _nativeArrayBuffer;
         private List<byte[]> _rawDateBuffer;
 
-        public void Initialize(Texture captureTargetTexture, uint captureFrameRate, string saveDirectoryParent)
+        private readonly WaitForEndOfFrame _waitForEndOfFrame = new WaitForEndOfFrame();
+
+        public void Initialize(Texture captureTargetTexture, uint captureFrameRate)
         {
             _captureTargetTexture = captureTargetTexture;
 
@@ -50,7 +51,6 @@ namespace AsyncCapture
 
                 _screenCapture = true;
                 _rt.grab = new RenderTexture(_width, _height, 0, _format);
-                _rt.flip = new RenderTexture(_width, _height, 0, _format);
             }
             else
             {
@@ -59,12 +59,24 @@ namespace AsyncCapture
                 _format = _captureTargetTexture.graphicsFormat;
             }
 
-            var bytesPerPixel = _format switch
+            _format = _format switch
             {
+                GraphicsFormat.RGBA_BC7_SRGB => GraphicsFormat.R8G8B8A8_SRGB,
+                GraphicsFormat.R8G8B8A8_SRGB => GraphicsFormat.R8G8B8A8_SRGB,
+                GraphicsFormat.R8G8B8A8_UNorm => GraphicsFormat.R8G8B8A8_UNorm,
+                GraphicsFormat.R32G32B32A32_SFloat => GraphicsFormat.R32G32B32A32_SFloat,
+                _ => throw new InvalidOperationException()
+            };
+
+            _bytesPerPixel = _format switch
+            {
+                GraphicsFormat.R8G8B8A8_SRGB => 32 / 8, // 32[bit]
                 GraphicsFormat.R8G8B8A8_UNorm => 32 / 8, // 32[bit]
                 GraphicsFormat.R32G32B32A32_SFloat => 128 / 8, // 128[bit] 
                 _ => throw new InvalidOperationException()
             };
+
+            _rt.flip = new RenderTexture(_width, _height, 0, _format);
 
             _captureFrameRate = (captureFrameRate <  1) ?  1 : captureFrameRate;
             _captureFrameRate = (captureFrameRate > 30) ? 30 : captureFrameRate;
@@ -80,23 +92,13 @@ namespace AsyncCapture
 
             for (int i = 0; i < _bufferCount; i++)
             {
-                _nativeArrayBuffer[i] = new NativeArray<byte>(_width * _height * bytesPerPixel, 
+                _nativeArrayBuffer[i] = new NativeArray<byte>(_width * _height * _bytesPerPixel, 
                                             Allocator.Persistent,NativeArrayOptions.UninitializedMemory);
-                _rawDateBuffer.Add(new byte[_width * _height * bytesPerPixel]);
+                _rawDateBuffer.Add(new byte[_width * _height * _bytesPerPixel]);
             }
 
             Debug.Log($"[AsyncCaptureDriver] Capture target texture size: {_width}x{_height}");
             Debug.Log($"[AsyncCaptureDriver] Capture target texture format: {_format}");
-
-            if (!Directory.Exists(saveDirectoryParent))
-            {
-                throw new DirectoryNotFoundException();
-            }
-
-            _saveDirectoryPath = $"{saveDirectoryParent}/AsyncCapture_{DateTime.Now.ToString("yyyy_MMdd_HHmmss")}";
-            Directory.CreateDirectory(_saveDirectoryPath);
-
-            Debug.Log($"[AsyncCaptureDriver] Save folder path: {_saveDirectoryPath}");
 
             _initialized = true;
         }
@@ -111,7 +113,17 @@ namespace AsyncCapture
             _autoDrive = false;
         }
 
-        public void RequestCapture()
+        public IEnumerator RequestCaptureCoroutine()
+        {
+            yield return _waitForEndOfFrame;
+
+            if (_initialized && enabled)
+            {
+                RequestCapture();
+            }
+        }
+
+        private void RequestCapture()
         {
             var index = _processedFrameCount++ % _bufferCount;
 
@@ -132,21 +144,25 @@ namespace AsyncCapture
             }
         }
 
-        private IEnumerator Start()
+#region MonoBehaviour
+
+        private void Start()
         {
             Debug.Log($"[AsyncCaptureDriver] Start");
+            Debug.Log($"[AsyncCaptureDriver] Interval: {1000.0f / _captureFrameRate} [ms]");
 
-            while (true)
-            {
-                var interval = 1.0f / _captureFrameRate;
-                yield return new WaitForSeconds(interval);
-                yield return new WaitForEndOfFrame();
-
-                if (_autoDrive && _initialized && enabled)
+            Observable
+                .Interval(TimeSpan.FromMilliseconds(1000.0f / _captureFrameRate), Scheduler.ThreadPool)
+                // .Do(_ => Debug.Log($"[AsyncCaptureDriver] Interval thread Id: {System.Threading.Thread.CurrentThread.ManagedThreadId}"))
+                .TakeUntilDestroy(this)
+                .ObserveOnMainThread()
+                .Subscribe(_ =>
                 {
-                    RequestCapture();
-                }
-            }
+                    if (_autoDrive)
+                    {
+                        StartCoroutine(RequestCaptureCoroutine());
+                    }
+                });
         }
 
         private void Update()
@@ -161,25 +177,9 @@ namespace AsyncCapture
                 if (!request.hasError && request.done) // NOTE: Faster (Unity 2020.3.20f1)
                 // if (request.done) // NOTE: Slower (Unity 2020.3.20f1)
                 {
-                    var rawData = _rawDateBuffer[i];
-                    _nativeArrayBuffer[i].CopyTo(rawData);
-
                     // Debug.Log($"[AsyncCaptureDriver] ***** Request[{i}] - Error: {request.hasError}, Done: {request.done}");
-
-                    // Run another thread
-                    Task.Run(() => 
-                    {
-                        try
-                        {
-                            // Debug.Log($"[AsyncCaptureDriver] Output processing thread id: {System.Threading.Thread.CurrentThread.ManagedThreadId}");
-                            var pngImageBytes = ImageConversion.EncodeArrayToPNG(rawData, _format, (uint)_width, (uint)_height);
-                            SavePngImage(pngImageBytes);
-                        }
-                        catch (Exception e)
-                        {
-                            Debug.LogError(e.StackTrace);
-                        }
-                    });
+                    _nativeArrayBuffer[i].CopyTo(_rawDateBuffer[i]);
+                    OnCapture?.Invoke(new Capture(){ Data = _rawDateBuffer[i], Format = _format, Width = _width, Height = _height });
                 }
             }
         }
@@ -201,14 +201,7 @@ namespace AsyncCapture
             Debug.Log($"[AsyncCaptureDriver] OnDestroy");
         }
 
-        private async void SavePngImage(byte[] pngImageBytes)
-        {
-			var savePath = $"{_saveDirectoryPath}/AsyncCaptureImage_{_saveImageCount++}.png";
+#endregion
 
-            using (var sourceStream = new FileStream(savePath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, 8192, true))
-            {
-                await sourceStream.WriteAsync(pngImageBytes, 0, pngImageBytes.Length);
-            }
-        }
     }
 }
