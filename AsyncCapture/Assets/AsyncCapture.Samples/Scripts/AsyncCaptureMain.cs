@@ -9,7 +9,8 @@ namespace AsyncCapture.Samples
     {
         [SerializeField] AsyncCaptureDriver _captureDriver;
 
-        private string _saveDirectoryPath;
+        private string _saveDirectoryBasePath;
+        private string _saveDirectoryName;
         private int _saveImageCount;
 
         void Awake()
@@ -18,11 +19,16 @@ namespace AsyncCapture.Samples
             UnityEngine.Application.targetFrameRate = 60;
             Debug.Log($"[AsyncCaptureMain] Target frame rate: {UnityEngine.Application.targetFrameRate}");
 
-            var desktopPath = System.Environment.GetFolderPath(System.Environment.SpecialFolder.DesktopDirectory);
-            _saveDirectoryPath = $"{desktopPath}/AsyncCapture_{DateTime.Now.ToString("yyyy_MMdd_HHmmss")}";
-            Directory.CreateDirectory(_saveDirectoryPath);
+            _saveDirectoryName = $"AsyncCapture_{DateTime.Now.ToString("yyyy_MMdd_HHmmss")}";
 
-            Debug.Log($"[AsyncCaptureMain] Save directory path: {_saveDirectoryPath}");
+#if UNITY_STANDALONE_WIN || UNITY_STANDALONE_OSX
+            var desktopPath = System.Environment.GetFolderPath(System.Environment.SpecialFolder.DesktopDirectory);
+            _saveDirectoryBasePath = $"{desktopPath}";
+
+            var saveDirectoryPath = Path.Combine(_saveDirectoryBasePath, _saveDirectoryName);
+            Directory.CreateDirectory(saveDirectoryPath);
+            Debug.Log($"[AsyncCaptureMain] Save directory path: {saveDirectoryPath}");
+#endif
 
             _captureDriver.Initialize(null, 30);
             _captureDriver.OnCapture += OnCapture;
@@ -32,6 +38,11 @@ namespace AsyncCapture.Samples
         void OnDestroy()
         {
             _captureDriver.OnCapture -= OnCapture;
+            _captureDriver.StopAutoCapture();
+        }
+
+        public void Stop()
+        {
             _captureDriver.StopAutoCapture();
         }
 
@@ -55,12 +66,16 @@ namespace AsyncCapture.Samples
 
         private async void SavePngImage(byte[] pngImageBytes)
         {
-			var savePath = $"{_saveDirectoryPath}/AsyncCaptureImage_{_saveImageCount++}.png";
+#if UNITY_STANDALONE_WIN || UNITY_STANDALONE_OSX            
+			var savePath = $"{_saveDirectoryBasePath}/{_saveDirectoryName}/AsyncCaptureImage_{_saveImageCount++}.png";
 
             using (var sourceStream = new FileStream(savePath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, 8192, true))
             {
                 await sourceStream.WriteAsync(pngImageBytes, 0, pngImageBytes.Length);
             }
+#elif UNITY_IOS
+            NativeGallery.SaveImageToGallery(pngImageBytes, _saveDirectoryName, $"AsyncCaptureImage_{_saveImageCount++}.png");
+#endif
         }
     }
 }
